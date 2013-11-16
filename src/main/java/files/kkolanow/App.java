@@ -12,10 +12,12 @@ import java.nio.file.attribute.BasicFileAttributeView;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.text.DateFormat;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.FileHandler;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -26,18 +28,20 @@ import java.util.logging.Logger;
 public class App 
 {
 	private static final String LAST_SYNC_TXT = "lastSync.txt";
-	private static Logger logger = Logger.getLogger(App.class.getName()); 
+	private static Logger logger = Logger.getLogger(App.class.getName());
+	private static String version = App.class.getPackage().getImplementationVersion();
 	
 	static {
 		logger.setLevel(Level.FINE);
+		logger.setUseParentHandlers(false);
 	}
 	
 	
     public static void main( String[] args ) throws IOException
     {
-        logger.info("Starting ");
+        print("Backup tool version: "+version);
         new App().process();
-        logger.info("End");
+        print("End.");
     }
     
     private void process() throws IOException {
@@ -45,24 +49,40 @@ public class App
     	Path backupDrivePath = driveLetter();
     	Path inputPathRoot = propertyToPath(PropertiesManager.INPUT_DIR); 
     	Path outputPathRoot = propertyToPath(PropertiesManager.OUTPUT_DIR);
+    	int maxPathLength = PropertiesManager.getIntProperty(PropertiesManager.MAX_PATH_LENGTH);
+    	
     	if( !outputPathRoot.isAbsolute()) {
     		outputPathRoot = FileSystems.getDefault().getPath(backupDrivePath.toString()+outputPathRoot.toString(), "");
     	} 
-    			
-        List<Path> inputFiles = listFolder(inputPathRoot,inputPathRoot);
+    	
+    	setupLog(inputPathRoot); 	 	
+
+    	List<Path> inputFiles = listFolder(inputPathRoot,inputPathRoot);
         List<Path> outputFiles = listFolder(outputPathRoot,outputPathRoot);
         List<Path> filesToCopy = findFilesToCopy(inputFiles,outputFiles, inputPathRoot, outputPathRoot);
         List<Path> filesToDelete = findDeletedFiles(inputFiles,outputFiles, inputPathRoot, outputPathRoot);
-        if (UserInteract.confirmChanges(filesToCopy, filesToDelete)) {
-        	copyFiles(filesToCopy,inputPathRoot,outputPathRoot);
-        	deleteFiles(filesToDelete);
+        
+        if (UserInteract.confirmChanges(filesToCopy, filesToDelete,maxPathLength, outputPathRoot)) {
+        	int copiedFiles = copyFiles(filesToCopy,inputPathRoot,outputPathRoot,maxPathLength);
+        	int deletedFiles = deleteFiles(filesToDelete,maxPathLength, outputPathRoot);
+        	
+        	print("Number of copiedFiles: "+copiedFiles);
+        	print("Number of deletedFiles: "+deletedFiles);
             updateLastSyncDate(inputPathRoot);
         } else {
-        	System.out.println("Process aborted");
+        	print("Process aborted by user");
         }
         
         
+        
     }
+
+	private void setupLog(Path inputPathRoot) throws IOException {
+		Path logPath = inputPathRoot.getParent();
+		SimpleDateFormat sdf = new SimpleDateFormat("yyyyy-mm-dd_hh-mm");
+    	FileHandler fh = new FileHandler(logPath.toAbsolutePath().toString()+ File.separator+"backupTool-"+sdf.format(new Date())+".log");
+		logger.addHandler(fh);
+	}
 
     
 private void updateLastSyncDate(Path inputRootPath) {
@@ -92,30 +112,50 @@ private Path driveLetter() {
  * removes files from output files path
  * @param filesToDelete
  * @throws IOException 
+ * @return number of deleted files
  */
-private void deleteFiles(List<Path> filesToDelete) throws IOException {
+private int deleteFiles(List<Path> filesToDelete, int charsToDisplay, Path outputPath) throws IOException {
 		logger.entering(this.getClass().getName(), "delete files");
+		print("Deleted files: ");
+		int deletedFiles=0;
 		for (Path fileToDelete:  filesToDelete ) {
 			Files.delete(fileToDelete);
-			logger.info("file deleted: "+filesToDelete.toString());
+			Path relativePath = outputPath.relativize(fileToDelete);
+			print(HelperMethods.truncate(charsToDisplay, relativePath));
+			deletedFiles++;
 		}
+		logger.exiting(this.getClass().getCanonicalName(), "deleteFiles");
+		return deletedFiles;
 	}
 
-private void copyFiles(List<Path> filesToCopy, Path inputPathRoot, Path outputPathRoot) {
+/**
+ * 
+ * @param filesToCopy
+ * @param inputPathRoot
+ * @param outputPathRoot
+ * @return number of successfuly copied files;
+ */
+private int copyFiles(List<Path> filesToCopy, Path inputPathRoot, Path outputPathRoot, int charsToDisplay) {
 		logger.entering(this.getClass().getName(), "copy files");
+		print("Copied files :");
+		int filesCopied=0;
 		for (Path fileToCopy: filesToCopy) {
 			Path from = FileSystems.getDefault().getPath(inputPathRoot.toString(), fileToCopy.toString());
 			Path to = FileSystems.getDefault().getPath(outputPathRoot.toString(), fileToCopy.toString());
 			try {
-				logger.info("copy file "+fileToCopy.toString());
+				print(HelperMethods.truncate(charsToDisplay,fileToCopy));
 				Files.createDirectories(to.getParent());
 				Files.copy(from, to, StandardCopyOption.COPY_ATTRIBUTES, StandardCopyOption.REPLACE_EXISTING);
+				filesCopied++;
 			} catch (IOException e) {
+				logger.log(Level.SEVERE, "Can't copy file "+fileToCopy);
+				logger.log(Level.SEVERE, e.getMessage());
 				e.printStackTrace();
 			}
 
 		}
-		
+		logger.exiting(this.getClass().getCanonicalName().toString(), "copyFiles");
+		return filesCopied;
 	}
 
 /**
@@ -134,7 +174,7 @@ private void copyFiles(List<Path> filesToCopy, Path inputPathRoot, Path outputPa
 		List<Path> deleteList =  new ArrayList<Path>();
 		for(Path outputFile: outputPaths) {
 			if(!inputPaths.contains(outputFile)) {
-				logger.fine("file to delete detected "+outputFile);
+				logger.info(outputFile.toString());
 				deleteList.add(
 						FileSystems.getDefault().getPath(
 								outputPath.toString(), outputFile.toString())
@@ -147,16 +187,20 @@ private void copyFiles(List<Path> filesToCopy, Path inputPathRoot, Path outputPa
 
 	private List<Path> findFilesToCopy(List<Path> inputFiles,
 			List<Path> outputFiles, Path rootInputPath, Path rootOutputPath) throws IOException {
-		logger.entering(this.getClass().getName(), "findFilesToCopy ");		
+		logger.entering(this.getClass().getName(), "findFilesToCopy ");
 		List<Path> filesToCopy = new ArrayList<Path>();
 		for(Path inputPath : inputFiles) {
 			if (outputFiles.contains(inputPath)) {
 				if (datesAreDifferent(inputPath, rootInputPath, rootOutputPath)) {
-					logger.fine("file to copy detected "+inputPath);
+					/**
+					 * TODO compare also a file size to ask user if that should be taken care... or maybe several modes of comparision are needed data, size, data and size...
+					 * as there was a problem when day saving time has been changed and all backup has been detected to be moved as hours were different by 1 
+					 */
+					logger.info(inputPath.toString());
 					filesToCopy.add(inputPath);
 				} 
 			} else {
-				logger.fine("file to copy detected "+inputPath);
+				logger.info(""+inputPath);
 				filesToCopy.add(inputPath);
 			}
 		}
@@ -181,24 +225,19 @@ private void copyFiles(List<Path> filesToCopy, Path inputPathRoot, Path outputPa
 	}
 
 	private FileTime lastModificationTime(Path inputFile, Path rootPath) {
+		logger.entering(this.getClass().getName(), "lastModificationTime");
 		Path filePath = rootPath.resolve(inputFile);
 		BasicFileAttributes fileAttributes = null;
 		try {
 			fileAttributes = Files.getFileAttributeView(filePath, BasicFileAttributeView.class).readAttributes();
 		} catch (IOException e) {
-			// TODO Auto-generated catch block
+			logger.log(Level.SEVERE, "Can't get last modificaiton time for file "+filePath.toAbsolutePath().toString());
+			logger.log(Level.SEVERE, e.getMessage());
 			e.printStackTrace();
 		}
 		return fileAttributes.lastModifiedTime();
 	}
 	
-	
-
-	private void printAll(List<Path> input) {
-		for(Path fileName: input) {
-			System.out.println(fileName.toString());
-		}
-	}
 
 
 	private  List<Path> listFolder(Path inputPath, Path root) {
@@ -220,6 +259,11 @@ private void copyFiles(List<Path> filesToCopy, Path inputPathRoot, Path outputPa
 		}
 		logger.exiting(this.getClass().getName(), "listFolder: "+inputPath.toString());
 		return files;
+	}
+	
+	private static void print(String message) {
+		logger.info(message);
+		System.out.println(message);
 	}
 	
 	

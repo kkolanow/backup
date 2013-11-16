@@ -8,6 +8,7 @@ public class PropertiesManager {
 	public static String INPUT_DIR = "INPUT_DIR";
 	public static String OUTPUT_DIR = "OUTPUT_DIR";
 	public static String DATE_PRECISION = "datePrecision";
+	public static String MAX_PATH_LENGTH = "MAX_PATH_LENGTH";
 	
 	private static Properties  prop = null; 
 	
@@ -30,6 +31,12 @@ public class PropertiesManager {
 		return prop.getProperty(name);
 	}
 	
+	public static int getIntProperty(String name) {
+		if (prop==null) {
+			load();
+		}
+		return Integer.parseInt(prop.getProperty(name));
+	}
 	
 	
 	
